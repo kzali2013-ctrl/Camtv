@@ -1,2 +1,2 @@
 
-buildscript { repositories { google() mavenCentral() } dependencies { classpath 'com.android.tools.build:gradle:8.1.4' } } allprojects { repositories { google() mavenCentral() } } task clean(type: Delete) { delete rootProject.buildDir }
+apply plugin: 'com.android.application'; android { namespace 'com.camtv.tv'; compileSdkVersion 33; defaultConfig { applicationId "com.camtv.tv"; minSdkVersion 21; targetSdkVersion 33; versionCode 1; versionName "1.0" } buildTypes { release { minifyEnabled false } debug { minifyEnabled false } } compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 } } dependencies { }
