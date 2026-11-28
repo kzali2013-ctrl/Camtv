@@ -21,8 +21,15 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    packaging {
+        jniLibs {
+            pickFirsts += ['**/libc++_shared.so']
+        }
+    }
 }
 
 dependencies {
     implementation 'org.videolan.android:libvlc-all:3.6.0'
+    implementation 'org.tensorflow:tensorflow-lite:2.14.0'
 }
