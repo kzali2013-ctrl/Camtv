@@ -1,0 +1,2 @@
+
+package com.camtv.tv; import android.app.Service; import android.content.Intent; import android.os.IBinder; public class MonitorService extends Service { public IBinder onBind(Intent i) { return null; } public int onStartCommand(Intent i, int f, int id) { return START_STICKY; } }
