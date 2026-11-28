@@ -8,6 +8,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -54,6 +55,7 @@ public class MainActivity extends Activity {
         etPass.setText(prefs.getString("pass", ""));
 
         ((Button) findViewById(R.id.btnTest)).setOnClickListener(v -> {
+            saveSettings();
             List<Integer> one = new ArrayList<>();
             one.add(1);
             startStreams(one, 0);
@@ -99,6 +101,19 @@ public class MainActivity extends Activity {
                 + "&channel=" + channel + "&stream=" + stream + ".sdp";
     }
 
+    private String describeError(PlaybackException error) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(error.getErrorCodeName());
+        Throwable c = error.getCause();
+        int depth = 0;
+        while (c != null && depth < 4) {
+            sb.append("\n").append(c.toString());
+            c = c.getCause();
+            depth++;
+        }
+        return sb.toString();
+    }
+
     private void startStreams(List<Integer> channels, int stream) {
         stopStreams();
 
@@ -133,16 +148,16 @@ public class MainActivity extends Activity {
         final TextView status = new TextView(this);
         status.setText("CH" + channel + " ...");
         status.setTextColor(0xFFFFFFFF);
-        status.setTextSize(12);
+        status.setTextSize(11);
         status.setPadding(8, 4, 8, 4);
 
         PlayerView pv = new PlayerView(this);
         pv.setUseController(false);
-        pv.setLayoutParams(new LinearLayout.LayoutParams(
+        pv.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
-        android.widget.FrameLayout cell = new android.widget.FrameLayout(this);
+        FrameLayout cell = new FrameLayout(this);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         lp.setMargins(2, 2, 2, 2);
@@ -168,7 +183,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPlayerError(PlaybackException error) {
-                status.setText("CH" + channel + " خطأ: " + error.getErrorCodeName());
+                status.setText("CH" + channel + " " + describeError(error));
             }
         });
 
