@@ -17,19 +17,27 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * عميل RTSP خفيف يعمل بدون شاشة وبدون فك ترميز الفيديو.
- * يقيس حجم بيانات الصورة المتحركة (P-frames) كل 300 مللي ثانية،
- * وعند ارتفاعها عن المعتاد يعتبرها حركة.
+ * عميل RTSP خفيف يعمل بدون شاشة.
+ * 1) يقيس حجم بيانات الصورة المتحركة لكشف الحركة فوراً.
+ * 2) يجمّع إطارات H.264 (آخر مجموعة إطارات) لتحليلها بالذكاء الاصطناعي عند الحاجة.
  */
 public class RtspMotionClient implements Runnable {
 
     public interface Listener {
-        void onMotion(int channel);
+        void onMotion(int channel, boolean onset);
     }
 
-    // مضاعف الارتفاع المطلوب فوق الوضع الطبيعي (يقل مع زيادة الحساسية)
+    public interface Sink {
+        /** هل نجمّع الإطارات الآن؟ */
+        boolean collect();
+
+        /** هل توجد جلسة تحليل نشطة لهذه الكاميرا؟ */
+        boolean isActive(int channel);
+
+        void onAccessUnit(int channel, byte[] au, boolean idr);
+    }
+
     private static final double[] MULT = {0, 5.0, 4.0, 3.2, 2.6, 2.1, 1.8, 1.55, 1.4, 1.25, 1.12};
-    // حد أدنى إضافي بالبايت (يقل مع زيادة الحساسية)
     private static final int[] FLOOR = {0, 1500, 1200, 900, 700, 500, 400, 300, 200, 150, 100};
 
     private static final long WINDOW_MS = 300;
@@ -37,6 +45,7 @@ public class RtspMotionClient implements Runnable {
     private static final long REPEAT_MS = 1000;
     private static final long END_MS = 1500;
     private static final long KEEPALIVE_MS = 20000;
+    private static final int GOP_MAX_BYTES = 1500000;
 
     private final int channel;
     private final String host;
@@ -44,6 +53,7 @@ public class RtspMotionClient implements Runnable {
     private final String path;
     private final SharedPreferences prefs;
     private final Listener listener;
+    private final Sink sink;
 
     private volatile boolean stopped = false;
     private volatile long lastData = 0;
@@ -56,18 +66,44 @@ public class RtspMotionClient implements Runnable {
     private long lastAlert = 0;
     private long connectTime = 0;
 
+    // تجميع إطارات H.264
+    private final ByteArrayOutputStream auBuf = new ByteArrayOutputStream(65536);
+    private final ByteArrayOutputStream fuBuf = new ByteArrayOutputStream(65536);
+    private boolean fuActive = false;
+    private boolean auIdr = false;
+    private long curTs = -1;
+    private final List<byte[]> gop = new ArrayList<>();
+    private int gopBytes = 0;
+    private volatile byte[] sps;
+    private volatile byte[] pps;
+
     public RtspMotionClient(int channel, String host, int port, String path,
-                            SharedPreferences prefs, Listener listener) {
+                            SharedPreferences prefs, Listener listener, Sink sink) {
         this.channel = channel;
         this.host = host;
         this.port = port;
         this.path = path;
         this.prefs = prefs;
         this.listener = listener;
+        this.sink = sink;
     }
 
     public int getChannel() {
         return channel;
+    }
+
+    public byte[] getSps() {
+        return sps;
+    }
+
+    public byte[] getPps() {
+        return pps;
+    }
+
+    public List<byte[]> snapshotGop() {
+        synchronized (gop) {
+            return new ArrayList<>(gop);
+        }
     }
 
     public boolean isConnected() {
@@ -125,10 +161,18 @@ public class RtspMotionClient implements Runnable {
         cseq = 1;
         baseline = -1;
         inMotion = false;
+        auBuf.reset();
+        fuBuf.reset();
+        fuActive = false;
+        auIdr = false;
+        curTs = -1;
+        synchronized (gop) {
+            gop.clear();
+            gopBytes = 0;
+        }
 
         String url = "rtsp://" + host + ":" + port + path;
 
-        // DESCRIBE
         send(out, "DESCRIBE " + url + " RTSP/1.0\r\nCSeq: " + (cseq++)
                 + "\r\nAccept: application/sdp\r\nUser-Agent: CamViewer\r\n\r\n");
         Response d = readResponse(in);
@@ -166,7 +210,6 @@ public class RtspMotionClient implements Runnable {
             if (idx > 8) cands.add(base.substring(0, idx + 1) + control);
         }
 
-        // SETUP
         Response sr = null;
         for (String u : cands) {
             send(out, "SETUP " + u + " RTSP/1.0\r\nCSeq: " + (cseq++)
@@ -195,7 +238,6 @@ public class RtspMotionClient implements Runnable {
             }
         }
 
-        // PLAY
         send(out, "PLAY " + b + " RTSP/1.0\r\nCSeq: " + (cseq++)
                 + (session != null ? "\r\nSession: " + session : "")
                 + "\r\nRange: npt=0.000-\r\nUser-Agent: CamViewer\r\n\r\n");
@@ -208,7 +250,6 @@ public class RtspMotionClient implements Runnable {
         long windowBytes = 0;
         byte[] buf = new byte[65536];
 
-        // قراءة الحزم
         while (!stopped) {
             int c = in.read();
             if (c < 0) throw new EOFException();
@@ -222,7 +263,7 @@ public class RtspMotionClient implements Runnable {
                 readFully(in, buf, len);
                 if (ch == rtpChannel) {
                     lastData = SystemClock.elapsedRealtime();
-                    windowBytes += countPayload(buf, len, hevc);
+                    windowBytes += processRtp(buf, len, hevc);
                 }
             } else if (c == 'R') {
                 String head = "R" + readHeaderText(in);
@@ -269,13 +310,12 @@ public class RtspMotionClient implements Runnable {
             baseline = baseline * 0.995 + bytes * 0.005;
             lastMotion = now;
             if (!inMotion) {
-                // بداية الحركة: تنبيه فوري
                 inMotion = true;
                 lastAlert = now;
-                listener.onMotion(channel);
+                listener.onMotion(channel, true);
             } else if (now - lastAlert >= REPEAT_MS) {
                 lastAlert = now;
-                listener.onMotion(channel);
+                listener.onMotion(channel, false);
             }
         } else {
             baseline = baseline * 0.9 + bytes * 0.1;
@@ -283,11 +323,16 @@ public class RtspMotionClient implements Runnable {
         }
     }
 
-    /** يحسب حجم بيانات شرائح الصورة المتحركة فقط (يتجاهل الصور المفتاحية). */
-    private static int countPayload(byte[] buf, int len, boolean hevc) {
+    // ---------- معالجة حزم RTP ----------
+
+    /** يرجع حجم بيانات الصورة المتحركة (للكشف)، ويجمّع الإطارات لو مطلوب. */
+    private int processRtp(byte[] buf, int len, boolean hevc) {
         if (len < 14) return 0;
         int cc = buf[0] & 0x0F;
         boolean ext = (buf[0] & 0x10) != 0;
+        boolean marker = (buf[1] & 0x80) != 0;
+        long ts = ((buf[4] & 0xFFL) << 24) | ((buf[5] & 0xFFL) << 16)
+                | ((buf[6] & 0xFFL) << 8) | (buf[7] & 0xFFL);
         int off = 12 + cc * 4;
         if (ext) {
             if (len < off + 4) return 0;
@@ -297,14 +342,109 @@ public class RtspMotionClient implements Runnable {
         if (off + 2 >= len) return 0;
         int payloadLen = len - off;
 
-        if (!hevc) {
-            int type = buf[off] & 0x1F;
-            if (type == 28 || type == 29) type = buf[off + 1] & 0x1F;
-            return (type >= 1 && type <= 4) ? payloadLen : 0;
-        } else {
+        if (hevc) {
             int type = (buf[off] >> 1) & 0x3F;
             if (type == 49) type = buf[off + 2] & 0x3F;
             return (type <= 9) ? payloadLen : 0;
+        }
+
+        int type = buf[off] & 0x1F;
+        int realType = type;
+        if (type == 28 || type == 29) realType = buf[off + 1] & 0x1F;
+        int counted = (realType >= 1 && realType <= 4) ? payloadLen : 0;
+
+        if (sink != null && sink.collect()) {
+            if (curTs != -1 && ts != curTs) flushAu();
+            curTs = ts;
+            depacketize(buf, off, len, type);
+            if (marker) flushAu();
+        }
+        return counted;
+    }
+
+    private void depacketize(byte[] buf, int off, int len, int type) {
+        if (type >= 1 && type <= 23) {
+            addNal(buf, off, len - off);
+        } else if (type == 24) {
+            int p = off + 1;
+            while (p + 2 < len) {
+                int size = ((buf[p] & 0xFF) << 8) | (buf[p + 1] & 0xFF);
+                p += 2;
+                if (size <= 0 || p + size > len) break;
+                addNal(buf, p, size);
+                p += size;
+            }
+        } else if (type == 28) {
+            if (off + 1 >= len) return;
+            int fu = buf[off + 1] & 0xFF;
+            boolean start = (fu & 0x80) != 0;
+            boolean end = (fu & 0x40) != 0;
+            if (start) {
+                fuBuf.reset();
+                fuBuf.write((buf[off] & 0xE0) | (fu & 0x1F));
+                fuActive = true;
+            }
+            if (fuActive) {
+                fuBuf.write(buf, off + 2, len - (off + 2));
+                if (end) {
+                    byte[] nal = fuBuf.toByteArray();
+                    fuActive = false;
+                    addNal(nal, 0, nal.length);
+                }
+            }
+        }
+    }
+
+    private void addNal(byte[] src, int off, int len) {
+        if (len <= 0) return;
+        int t = src[off] & 0x1F;
+        if (t == 7) {
+            byte[] c = new byte[len];
+            System.arraycopy(src, off, c, 0, len);
+            sps = c;
+        } else if (t == 8) {
+            byte[] c = new byte[len];
+            System.arraycopy(src, off, c, 0, len);
+            pps = c;
+        } else if (t == 5) {
+            auIdr = true;
+        } else if (t == 9) {
+            return;
+        }
+        auBuf.write(0);
+        auBuf.write(0);
+        auBuf.write(0);
+        auBuf.write(1);
+        auBuf.write(src, off, len);
+    }
+
+    private void flushAu() {
+        if (auBuf.size() == 0) {
+            auIdr = false;
+            return;
+        }
+        byte[] au = auBuf.toByteArray();
+        boolean idr = auIdr;
+        auBuf.reset();
+        auIdr = false;
+
+        synchronized (gop) {
+            if (idr) {
+                gop.clear();
+                gopBytes = 0;
+            }
+            if (idr || !gop.isEmpty()) {
+                gop.add(au);
+                gopBytes += au.length;
+            }
+            if (gopBytes > GOP_MAX_BYTES) {
+                gop.clear();
+                gopBytes = 0;
+            }
+        }
+
+        if (sink != null && sink.isActive(channel)) {
+            sink.onAccessUnit(channel, au, idr);
         }
     }
 
