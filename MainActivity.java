@@ -1,2 +1,195 @@
+package com.example.camviewer;
 
-package com.camtv.tv; import android.app.Activity; import android.content.*; import android.net.Uri; import android.os.Bundle; import android.view.*; import android.widget.*; import java.util.ArrayList; public class MainActivity extends Activity { EditText etIp, etUser, etPass; TextView tvStatus; GridLayout grid; ArrayList<VideoView> views = new ArrayList<>(); SharedPreferences prefs; String ip="192.168.0.112", user="admin", pass=""; boolean[] alertEnabled = new boolean[]{true,true,true,true,true,true,true,true}; @Override protected void onCreate(Bundle b){ super.onCreate(b); setContentView(R.layout.activity_main); prefs = getSharedPreferences("camtv", MODE_PRIVATE); ip = prefs.getString("ip", ip); user = prefs.getString("user", user); pass = prefs.getString("pass", pass); etIp = findViewById(R.id.etIp); etUser = findViewById(R.id.etUser); etPass = findViewById(R.id.etPass); tvStatus = findViewById(R.id.tvStatus); grid = findViewById(R.id.grid); LinearLayout alertRow = findViewById(R.id.alertRow); etIp.setText(ip); etUser.setText(user); etPass.setText(pass); for(int i=1;i<=8;i++){ VideoView vv = new VideoView(this); final int ch=i; vv.setOnClickListener(v-> Toast.makeText(this,"كامرة "+ch, Toast.LENGTH_SHORT).show()); vv.setOnErrorListener((mp,what,extra)->{ tvStatus.setText("كامرة "+ch+" - خطأ اتصال، تأكد من IP"); return true; }); grid.addView(vv); views.add(vv); CheckBox cb = new CheckBox(this); cb.setText("تنبيه كامرة "+ch); cb.setChecked(true); cb.setTextColor(0xFFFFFFFF); final int idx=i-1; cb.setOnCheckedChangeListener((btn,checked)-> alertEnabled[idx]=checked); alertRow.addView(cb); } findViewById(R.id.btnSave).setOnClickListener(v-> saveAndConnect()); findViewById(R.id.btnStop).setOnClickListener(v-> stopAll()); findViewById(R.id.btnBg).setOnClickListener(v-> goBackground()); findViewById(R.id.btnTestMotion).setOnClickListener(v-> showMotion(3)); if(prefs.getBoolean("autostart", true)) saveAndConnect(); } void saveAndConnect(){ ip=etIp.getText().toString().trim(); user=etUser.getText().toString().trim(); pass=etPass.getText().toString().trim(); prefs.edit().putString("ip",ip).putString("user",user).putString("pass",pass).apply(); tvStatus.setText("جار الاتصال على: "+ip+" - 8 كاميرات"); for(int i=0;i<8;i++){ int ch=i+1; String url = "rtsp://"+user+":"+pass+"@"+ip+":554/avstream/channel="+ch+"/stream=0.sdp"; VideoView vv=views.get(i); vv.setVideoURI(Uri.parse(url)); vv.setOnPreparedListener(mp-> mp.setLooping(true)); vv.start(); } startService(new Intent(this, MonitorService.class)); } void stopAll(){ for(VideoView vv: views) vv.stopPlayback(); tvStatus.setText("تم إيقاف المراقبة - Stop monitoring"); stopService(new Intent(this, MonitorService.class)); } void goBackground(){ moveTaskToBack(true); Toast.makeText(this,"المراقبة شغالة بالخلفية", Toast.LENGTH_LONG).show(); } void showMotion(int ch){ if(!alertEnabled[ch-1]) return; Toast.makeText(this,"حركة كامرة "+ch, Toast.LENGTH_LONG).show(); tvStatus.setText("حركة كامرة "+ch+" - تنبيه"); } }
+import android.app.Activity;
+import android.content.SharedPreferences;
+import android.os.Bundle;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import com.google.android.exoplayer2.ExoPlayer;
+import com.google.android.exoplayer2.MediaItem;
+import com.google.android.exoplayer2.PlaybackException;
+import com.google.android.exoplayer2.Player;
+import com.google.android.exoplayer2.source.rtsp.RtspMediaSource;
+import com.google.android.exoplayer2.ui.PlayerView;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class MainActivity extends Activity {
+
+    private EditText etIp, etUser, etPass;
+    private LinearLayout videoContainer;
+    private final CheckBox[] checks = new CheckBox[8];
+    private final List<ExoPlayer> players = new ArrayList<>();
+    private SharedPreferences prefs;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        prefs = getSharedPreferences("cam", MODE_PRIVATE);
+
+        etIp = findViewById(R.id.etIp);
+        etUser = findViewById(R.id.etUser);
+        etPass = findViewById(R.id.etPass);
+        videoContainer = findViewById(R.id.videoContainer);
+
+        int[] ids = {R.id.cb1, R.id.cb2, R.id.cb3, R.id.cb4,
+                R.id.cb5, R.id.cb6, R.id.cb7, R.id.cb8};
+        for (int i = 0; i < 8; i++) {
+            checks[i] = findViewById(ids[i]);
+            checks[i].setChecked(prefs.getBoolean("ch" + (i + 1), true));
+        }
+
+        etIp.setText(prefs.getString("ip", "192.168.0.112"));
+        etUser.setText(prefs.getString("user", "admin"));
+        etPass.setText(prefs.getString("pass", ""));
+
+        ((Button) findViewById(R.id.btnTest)).setOnClickListener(v -> {
+            List<Integer> one = new ArrayList<>();
+            one.add(1);
+            startStreams(one, 0);
+        });
+
+        ((Button) findViewById(R.id.btnBack)).setOnClickListener(v -> {
+            stopStreams();
+            finish();
+        });
+
+        ((Button) findViewById(R.id.btnStop)).setOnClickListener(v -> stopStreams());
+
+        ((Button) findViewById(R.id.btnConnect)).setOnClickListener(v -> {
+            saveSettings();
+            List<Integer> chosen = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                if (checks[i].isChecked()) chosen.add(i + 1);
+            }
+            if (chosen.isEmpty()) {
+                Toast.makeText(this, "اختر كاميرا واحدة على الأقل", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            startStreams(chosen, chosen.size() == 1 ? 0 : 1);
+        });
+    }
+
+    private void saveSettings() {
+        SharedPreferences.Editor e = prefs.edit();
+        e.putString("ip", etIp.getText().toString().trim());
+        e.putString("user", etUser.getText().toString().trim());
+        e.putString("pass", etPass.getText().toString());
+        for (int i = 0; i < 8; i++) {
+            e.putBoolean("ch" + (i + 1), checks[i].isChecked());
+        }
+        e.apply();
+    }
+
+    private String buildUrl(int channel, int stream) {
+        String ip = etIp.getText().toString().trim();
+        String user = etUser.getText().toString().trim();
+        String pass = etPass.getText().toString();
+        return "rtsp://" + ip + ":554/user=" + user + "&password=" + pass
+                + "&channel=" + channel + "&stream=" + stream + ".sdp";
+    }
+
+    private void startStreams(List<Integer> channels, int stream) {
+        stopStreams();
+
+        int n = channels.size();
+        int cols = (int) Math.ceil(Math.sqrt(n));
+        int rows = (int) Math.ceil(n / (double) cols);
+
+        int index = 0;
+        for (int r = 0; r < rows; r++) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+            for (int c = 0; c < cols; c++) {
+                if (index < n) {
+                    int channel = channels.get(index);
+                    row.addView(createCell(channel, stream));
+                    index++;
+                } else {
+                    View filler = new View(this);
+                    filler.setLayoutParams(new LinearLayout.LayoutParams(0,
+                            ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+                    row.addView(filler);
+                }
+            }
+            videoContainer.addView(row);
+        }
+    }
+
+    private View createCell(int channel, int stream) {
+        final TextView status = new TextView(this);
+        status.setText("CH" + channel + " ...");
+        status.setTextColor(0xFFFFFFFF);
+        status.setTextSize(12);
+        status.setPadding(8, 4, 8, 4);
+
+        PlayerView pv = new PlayerView(this);
+        pv.setUseController(false);
+        pv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        android.widget.FrameLayout cell = new android.widget.FrameLayout(this);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+        lp.setMargins(2, 2, 2, 2);
+        cell.setLayoutParams(lp);
+        cell.addView(pv);
+        cell.addView(status);
+
+        ExoPlayer player = new ExoPlayer.Builder(this).build();
+        pv.setPlayer(player);
+
+        MediaItem item = MediaItem.fromUri(buildUrl(channel, stream));
+        RtspMediaSource source = new RtspMediaSource.Factory()
+                .setForceUseRtpTcp(true)
+                .createMediaSource(item);
+
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_READY) {
+                    status.setText("CH" + channel);
+                }
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                status.setText("CH" + channel + " خطأ: " + error.getErrorCodeName());
+            }
+        });
+
+        player.setMediaSource(source);
+        player.prepare();
+        player.play();
+        players.add(player);
+        return cell;
+    }
+
+    private void stopStreams() {
+        for (ExoPlayer p : players) {
+            p.release();
+        }
+        players.clear();
+        videoContainer.removeAllViews();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        stopStreams();
+    }
+}
