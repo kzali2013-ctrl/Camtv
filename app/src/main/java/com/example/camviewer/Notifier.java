@@ -43,6 +43,7 @@ public class Notifier {
         return PendingIntent.getActivity(ctx, code, i, flags);
     }
 
+    /** تنبيه فوري بصوت عند بدء الحركة. */
     public static void alert(Context ctx, int channel) {
         try {
             NotificationManager nm =
@@ -70,6 +71,33 @@ public class Notifier {
         }
     }
 
+    /** تحديث صامت لنفس إشعار الكاميرا بوصف ما حدث (بدون صوت إضافي). */
+    public static void alertText(Context ctx, int channel, String text) {
+        try {
+            NotificationManager nm =
+                    (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+
+            Notification.Builder b;
+            if (Build.VERSION.SDK_INT >= 26) {
+                b = new Notification.Builder(ctx, ALERT_CHANNEL);
+            } else {
+                b = new Notification.Builder(ctx);
+                b.setPriority(Notification.PRIORITY_HIGH);
+            }
+            b.setSmallIcon(android.R.drawable.ic_dialog_alert)
+                    .setContentTitle("تنبيه حركة")
+                    .setContentText(text)
+                    .setStyle(new Notification.BigTextStyle().bigText(text))
+                    .setContentIntent(openApp(ctx, 200 + channel))
+                    .setOnlyAlertOnce(true)
+                    .setWhen(System.currentTimeMillis())
+                    .setAutoCancel(true);
+
+            nm.notify(100 + channel, b.build());
+        } catch (Exception ignored) {
+        }
+    }
+
     public static Notification serviceNotification(Context ctx) {
         return serviceNotification(ctx, "يتم رصد الحركة في الخلفية");
     }
@@ -84,6 +112,7 @@ public class Notifier {
         b.setSmallIcon(android.R.drawable.ic_menu_view)
                 .setContentTitle("مراقبة الكاميرات تعمل")
                 .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
                 .setContentIntent(openApp(ctx, 1))
                 .setOnlyAlertOnce(true)
                 .setOngoing(true);
