@@ -2,6 +2,7 @@ package com.example.camviewer;
 
 import android.app.Activity;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
@@ -13,12 +14,10 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.google.android.exoplayer2.ExoPlayer;
-import com.google.android.exoplayer2.MediaItem;
-import com.google.android.exoplayer2.PlaybackException;
-import com.google.android.exoplayer2.Player;
-import com.google.android.exoplayer2.source.rtsp.RtspMediaSource;
-import com.google.android.exoplayer2.ui.PlayerView;
+import org.videolan.libvlc.LibVLC;
+import org.videolan.libvlc.Media;
+import org.videolan.libvlc.MediaPlayer;
+import org.videolan.libvlc.util.VLCVideoLayout;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,7 +27,9 @@ public class MainActivity extends Activity {
     private EditText etIp, etUser, etPass;
     private LinearLayout videoContainer;
     private final CheckBox[] checks = new CheckBox[8];
-    private final List<ExoPlayer> players = new ArrayList<>();
+    private final List<MediaPlayer> players = new ArrayList<>();
+    private final List<VLCVideoLayout> layouts = new ArrayList<>();
+    private LibVLC libVLC;
     private SharedPreferences prefs;
 
     @Override
@@ -101,21 +102,13 @@ public class MainActivity extends Activity {
                 + "&channel=" + channel + "&stream=" + stream + ".sdp";
     }
 
-    private String describeError(PlaybackException error) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(error.getErrorCodeName());
-        Throwable c = error.getCause();
-        int depth = 0;
-        while (c != null && depth < 4) {
-            sb.append("\n").append(c.toString());
-            c = c.getCause();
-            depth++;
-        }
-        return sb.toString();
-    }
-
     private void startStreams(List<Integer> channels, int stream) {
         stopStreams();
+
+        ArrayList<String> options = new ArrayList<>();
+        options.add("--rtsp-tcp");
+        options.add("--network-caching=300");
+        libVLC = new LibVLC(this, options);
 
         int n = channels.size();
         int cols = (int) Math.ceil(Math.sqrt(n));
@@ -151,9 +144,8 @@ public class MainActivity extends Activity {
         status.setTextSize(11);
         status.setPadding(8, 4, 8, 4);
 
-        PlayerView pv = new PlayerView(this);
-        pv.setUseController(false);
-        pv.setLayoutParams(new FrameLayout.LayoutParams(
+        VLCVideoLayout vlcLayout = new VLCVideoLayout(this);
+        vlcLayout.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -162,43 +154,55 @@ public class MainActivity extends Activity {
                 0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         lp.setMargins(2, 2, 2, 2);
         cell.setLayoutParams(lp);
-        cell.addView(pv);
+        cell.addView(vlcLayout);
         cell.addView(status);
 
-        ExoPlayer player = new ExoPlayer.Builder(this).build();
-        pv.setPlayer(player);
+        MediaPlayer mp = new MediaPlayer(libVLC);
+        mp.attachViews(vlcLayout, null, false, false);
 
-        MediaItem item = MediaItem.fromUri(buildUrl(channel, stream));
-        RtspMediaSource source = new RtspMediaSource.Factory()
-                .setForceUseRtpTcp(true)
-                .createMediaSource(item);
-
-        player.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_READY) {
+        mp.setEventListener(event -> {
+            switch (event.type) {
+                case MediaPlayer.Event.Playing:
                     status.setText("CH" + channel);
-                }
-            }
-
-            @Override
-            public void onPlayerError(PlaybackException error) {
-                status.setText("CH" + channel + " " + describeError(error));
+                    mp.setVideoScale(MediaPlayer.ScaleType.SURFACE_BEST_FIT);
+                    break;
+                case MediaPlayer.Event.EncounteredError:
+                    status.setText("CH" + channel + " خطأ في التشغيل");
+                    break;
+                case MediaPlayer.Event.EndReached:
+                    status.setText("CH" + channel + " انتهى البث");
+                    break;
+                default:
+                    break;
             }
         });
 
-        player.setMediaSource(source);
-        player.prepare();
-        player.play();
-        players.add(player);
+        Media media = new Media(libVLC, Uri.parse(buildUrl(channel, stream)));
+        media.addOption(":network-caching=300");
+        mp.setMedia(media);
+        media.release();
+        mp.play();
+
+        players.add(mp);
+        layouts.add(vlcLayout);
         return cell;
     }
 
     private void stopStreams() {
-        for (ExoPlayer p : players) {
-            p.release();
+        for (MediaPlayer p : players) {
+            try {
+                p.stop();
+                p.detachViews();
+                p.release();
+            } catch (Exception ignored) {
+            }
         }
         players.clear();
+        layouts.clear();
+        if (libVLC != null) {
+            libVLC.release();
+            libVLC = null;
+        }
         videoContainer.removeAllViews();
     }
 
