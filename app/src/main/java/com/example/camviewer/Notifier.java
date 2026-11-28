@@ -71,6 +71,10 @@ public class Notifier {
     }
 
     public static Notification serviceNotification(Context ctx) {
+        return serviceNotification(ctx, "يتم رصد الحركة في الخلفية");
+    }
+
+    public static Notification serviceNotification(Context ctx, String text) {
         Notification.Builder b;
         if (Build.VERSION.SDK_INT >= 26) {
             b = new Notification.Builder(ctx, SERVICE_CHANNEL);
@@ -79,8 +83,9 @@ public class Notifier {
         }
         b.setSmallIcon(android.R.drawable.ic_menu_view)
                 .setContentTitle("مراقبة الكاميرات تعمل")
-                .setContentText("يتم رصد الحركة في الخلفية")
+                .setContentText(text)
                 .setContentIntent(openApp(ctx, 1))
+                .setOnlyAlertOnce(true)
                 .setOngoing(true);
         return b.build();
     }
